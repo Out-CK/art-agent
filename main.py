@@ -2,8 +2,9 @@
 CLI entrypoint for the NYC Art Gallery Agent.
 
 Usage:
-    python main.py --run-now    # Trigger an Art Run immediately
-    python main.py --schedule   # Start the daily scheduler (blocks until Ctrl+C)
+    python main.py --run-now        # Trigger an Art Run immediately
+    python main.py --schedule       # Start the daily scheduler (blocks until Ctrl+C)
+    python main.py --enrich-venues  # Find addresses for unmapped venues
 """
 import argparse
 import os
@@ -43,6 +44,7 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--run-now", action="store_true", help="Trigger an Art Run immediately")
     group.add_argument("--schedule", action="store_true", help="Start the daily scheduler")
+    group.add_argument("--enrich-venues", action="store_true", help="Find addresses for unmapped venues")
     args = parser.parse_args()
 
     from db.supabase_client import get_supabase_client
@@ -57,6 +59,11 @@ def main() -> None:
         logger.info("Mode: --schedule | Starting daily scheduler")
         from scheduler.job_scheduler import start_scheduler
         start_scheduler()
+
+    elif args.enrich_venues:
+        logger.info("Mode: --enrich-venues | Finding addresses for unmapped venues")
+        from agent.venue_enricher import VenueEnricher
+        VenueEnricher(event_type="art").run()
 
 
 if __name__ == "__main__":

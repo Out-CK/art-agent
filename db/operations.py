@@ -130,8 +130,8 @@ def delete_event_entry(event_entry_id: str) -> None:
 # Past Event Entry Database
 # ---------------------------------------------------------------------------
 
-def get_unmapped_venues() -> dict[str, list[str]]:
-    """Return {venue_name: [event_entry_id, ...]} for all future events with no lat/lng."""
+def get_unmapped_venues(event_type: str) -> dict[str, list[str]]:
+    """Return {venue_name: [event_entry_id, ...]} for future events of a given type with no lat/lng."""
     client = get_supabase_client()
     today_str = date.today().strftime("%m-%d-%Y")
     try:
@@ -139,6 +139,7 @@ def get_unmapped_venues() -> dict[str, list[str]]:
             client.table("event_entry_database")
             .select("event_entry_id, venue")
             .is_("lat", "null")
+            .eq("event_type", event_type)
             .gte("date", today_str)
             .execute()
         )
