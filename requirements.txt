@@ -1,0 +1,12 @@
+langchain>=0.3.0
+langchain-anthropic>=0.3.0
+langchain-core>=0.3.0
+anthropic>=0.40.0
+nimble-python>=0.2.0
+supabase>=2.0.0
+apscheduler>=3.10.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+httpx>=0.27.0
+tenacity>=8.2.0
+pytz>=2024.1
