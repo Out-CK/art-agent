@@ -47,7 +47,7 @@ class NimbleSearchTool(BaseTool):
 
         result = nimble.search(
             query=query,
-            num_results=max_results,
+            max_results=max_results,
         )
 
         pages = []
