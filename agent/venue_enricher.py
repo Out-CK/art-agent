@@ -16,6 +16,7 @@ from langchain_anthropic import ChatAnthropic
 from pydantic import BaseModel
 
 from db.operations import get_unmapped_venues, update_venue_coords
+from tools.nimble_extract_tool import NimbleExtractTool
 from tools.nimble_search_tool import NimbleSearchTool
 from utils.geocoder import lookup_coords
 from utils.logger import get_logger
@@ -34,6 +35,7 @@ class VenueEnricher:
         self._event_type = event_type
         self._llm = ChatAnthropic(model=MODEL).with_structured_output(VenueAddress)
         self._search = NimbleSearchTool()
+        self._extract = NimbleExtractTool()
 
     def run(self) -> None:
         venues = get_unmapped_venues(self._event_type)
@@ -64,17 +66,28 @@ class VenueEnricher:
         if result:
             return result
 
-        # 2. Nimble search → LLM address extraction → Nominatim geocode
+        # 2. Nimble search snippets → LLM address extraction → Nominatim geocode
         address = self._search_for_address(venue)
-        if not address:
-            return None
+        if address:
+            result = self._geocode_address(address, venue)
+            if result:
+                return result
 
+        # 3. Extract venue website → LLM address extraction → Nominatim geocode
+        address = self._extract_address_from_website(venue)
+        if address:
+            result = self._geocode_address(address, venue)
+            if result:
+                return result
+
+        return None
+
+    def _geocode_address(self, address: str, venue: str) -> Optional[tuple[float, float, str]]:
+        """Attempt to geocode an extracted address string."""
         result = lookup_coords(address)
         if result:
             return result
 
-        # If Nominatim can't geocode the extracted address string, try it as-is
-        # with a more permissive bare search
         from utils.geocoder import _nominatim_search_bare, _build_address
         try:
             results = _nominatim_search_bare(address)
@@ -85,6 +98,48 @@ class VenueEnricher:
             logger.warning(f"Bare geocode of extracted address failed for '{venue}': {e}")
 
         return None
+
+    def _extract_address_from_website(self, venue: str) -> Optional[str]:
+        """Find the venue's website via search, extract full page, and pull the address."""
+        try:
+            results = self._search._run(f"{venue} NYC official site", "niche")
+            if not results:
+                return None
+
+            # Pick the most likely venue website (skip yelp, google, facebook, tripadvisor)
+            skip_domains = {"yelp.com", "google.com", "facebook.com", "tripadvisor.com",
+                            "instagram.com", "twitter.com", "wikipedia.org", "mapquest.com"}
+            target_url = None
+            for r in results[:5]:
+                url = r.get("url", "")
+                domain = url.split("/")[2] if url.startswith("http") and len(url.split("/")) > 2 else ""
+                if not any(sd in domain for sd in skip_domains):
+                    target_url = url
+                    break
+
+            if not target_url:
+                return None
+
+            # Extract full page content
+            page = self._extract._run(target_url)
+            content = (page.get("content") or "")[:5000]
+            if not content:
+                return None
+
+            prompt = (
+                f"I'm trying to find the street address of this NYC venue: \"{venue}\"\n\n"
+                f"Here is the content from their website ({target_url}):\n\n{content}\n\n"
+                f"Extract the full street address (e.g. '35 W 35th St, New York, NY 10001'). "
+                f"If you can't find a specific street address, return null."
+            )
+
+            result: VenueAddress = self._llm.invoke([{"role": "user", "content": prompt}])
+            if result.address:
+                logger.debug(f"Website extraction found address for '{venue}': {result.address}")
+            return result.address
+        except Exception as e:
+            logger.warning(f"Website address extraction failed for '{venue}': {e}")
+            return None
 
     def _search_for_address(self, venue: str) -> Optional[str]:
         """Use Nimble to find the venue, then have the LLM extract a clean street address."""
