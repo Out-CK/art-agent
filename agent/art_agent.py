@@ -13,6 +13,7 @@ from langchain_anthropic import ChatAnthropic
 from pydantic import BaseModel
 
 from agent.art_batch_parser import ArtBatchParser, ArtEntry
+from agent.art_direct_scraper import ArtDirectScraper
 from agent.art_instagram_parser import ArtInstagramParser
 from agent.duplicate_finder import DuplicateFinder
 from agent.art_link_finder import ArtLinkFinderAgent as LinkFinderAgent
@@ -175,6 +176,10 @@ class ArtAgent:
         stats = {
             "instagram_profiles_scraped": 0,
             "instagram_entries_parsed": 0,
+            "aggregator_pages_scraped": 0,
+            "aggregator_entries_parsed": 0,
+            "gallery_pages_scraped": 0,
+            "gallery_entries_parsed": 0,
             "queries_executed": 0,
             "pages_round1": 0,
             "pages_round2": 0,
@@ -242,6 +247,59 @@ class ArtAgent:
                 logger.info(f"Instagram: parsed {len(ig_entries)} art entries")
         except Exception as e:
             logger.error(f"Step 0a failed: {e}")
+
+        # Step 0b — Direct Aggregator Scraping
+        self._step_log("Step 0b: Direct Aggregator Scraping")
+        aggregator_pages: list[dict] = []
+        aggregator_entries: list[ArtEntry] = []
+        try:
+            scraper = ArtDirectScraper()
+            aggregator_pages = scraper.scrape_aggregators(tracker)
+            stats["aggregator_pages_scraped"] = len(aggregator_pages)
+            tracker.set("aggregator_pages_scraped", len(aggregator_pages))
+            if aggregator_pages:
+                insert_web_batch([
+                    {"web_batch_id": web_batch_id, "source_url": r["url"],
+                     "query_used": "aggregator_direct", "round": 0, "content": (r.get("content") or "")[:10000]}
+                    for r in aggregator_pages
+                ])
+                agg_raw = ArtBatchParser().parse(aggregator_pages)
+                stats["aggregator_entries_parsed"] = len(agg_raw)
+                tracker.set("aggregator_entries_parsed", len(agg_raw))
+                for entry in agg_raw:
+                    entry.entry_batch_id = entry_batch_id
+                    entry.event_entry_id = id_generator.next()
+                aggregator_entries = agg_raw
+                logger.info(f"Aggregator scrape: parsed {len(agg_raw)} entries from {len(aggregator_pages)} pages")
+        except Exception as e:
+            logger.error(f"Step 0b failed: {e}")
+
+        # Step 0c — Direct Gallery Website Scraping
+        self._step_log("Step 0c: Direct Gallery Website Scraping")
+        gallery_pages: list[dict] = []
+        gallery_entries: list[ArtEntry] = []
+        try:
+            if not aggregator_pages:
+                scraper = ArtDirectScraper()
+            gallery_pages = scraper.scrape_galleries(tracker)
+            stats["gallery_pages_scraped"] = len(gallery_pages)
+            tracker.set("gallery_pages_scraped", len(gallery_pages))
+            if gallery_pages:
+                insert_web_batch([
+                    {"web_batch_id": web_batch_id, "source_url": r["url"],
+                     "query_used": "gallery_direct", "round": 0, "content": (r.get("content") or "")[:10000]}
+                    for r in gallery_pages
+                ])
+                gal_raw = ArtBatchParser().parse(gallery_pages)
+                stats["gallery_entries_parsed"] = len(gal_raw)
+                tracker.set("gallery_entries_parsed", len(gal_raw))
+                for entry in gal_raw:
+                    entry.entry_batch_id = entry_batch_id
+                    entry.event_entry_id = id_generator.next()
+                gallery_entries = gal_raw
+                logger.info(f"Gallery scrape: parsed {len(gal_raw)} entries from {len(gallery_pages)} pages")
+        except Exception as e:
+            logger.error(f"Step 0c failed: {e}")
 
         # Step 1 — Generate Search Plan
         self._step_log("Step 1: Generate Art Search Plan")
@@ -334,15 +392,17 @@ class ArtAgent:
             for entry in raw_entries:
                 entry.entry_batch_id = entry_batch_id
                 entry.event_entry_id = id_generator.next()
-            # Merge social entries + web entries into one batch
-            entry_batch = social_entries + raw_entries
+            # Merge all entry sources into one batch
+            entry_batch = social_entries + aggregator_entries + gallery_entries + raw_entries
             logger.info(
                 f"Parsed {len(raw_entries)} web entries + "
-                f"{len(social_entries)} social entries = {len(entry_batch)} total"
+                f"{len(social_entries)} social entries + "
+                f"{len(aggregator_entries)} aggregator entries + "
+                f"{len(gallery_entries)} gallery entries = {len(entry_batch)} total"
             )
         except Exception as e:
             logger.error(f"Step 7 failed: {e}")
-            entry_batch = social_entries  # fall back to social-only if web parsing fails
+            entry_batch = social_entries + aggregator_entries + gallery_entries
 
         # Step 7b — Geocoding Enrichment
         self._step_log("Step 7b: Geocoding Enrichment")
@@ -425,6 +485,10 @@ class ArtAgent:
             f"=== Art Run COMPLETE | entry_batch_id={entry_batch_id} | duration={duration:.1f}s ===\n"
             f"  Instagram profiles scraped:  {stats['instagram_profiles_scraped']}\n"
             f"  Instagram entries parsed:    {stats['instagram_entries_parsed']}\n"
+            f"  Aggregator pages scraped:    {stats['aggregator_pages_scraped']}\n"
+            f"  Aggregator entries parsed:   {stats['aggregator_entries_parsed']}\n"
+            f"  Gallery pages scraped:       {stats['gallery_pages_scraped']}\n"
+            f"  Gallery entries parsed:      {stats['gallery_entries_parsed']}\n"
             f"  Web queries executed:        {stats['queries_executed']}\n"
             f"  Pages fetched (Round 1):     {stats['pages_round1']}\n"
             f"  Pages fetched (Round 2):     {stats['pages_round2']}\n"
