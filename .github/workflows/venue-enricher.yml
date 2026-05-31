@@ -1,9 +1,6 @@
 name: Daily Venue Enricher
 
-on:
-  schedule:
-    - cron: "30 13 * * *" # 9:30 AM ET (UTC-4)
-  workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
   venue-enricher:

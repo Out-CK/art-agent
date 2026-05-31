@@ -1,9 +1,6 @@
 name: Daily Art Run
 
-on:
-  schedule:
-    - cron: "0 13 * * *" # 9:00 AM ET (UTC-4)
-  workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
   art-run:
