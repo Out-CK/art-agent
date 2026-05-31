@@ -225,7 +225,12 @@ class ArtAgent:
                 for post in posts:
                     caption = self._extract_post_caption(post)
                     if caption:
-                        combined_text += f"---\nPOST: {caption}\n"
+                        shortcode = self._extract_post_shortcode(post)
+                        if shortcode:
+                            post_url = f"https://www.instagram.com/p/{shortcode}/"
+                            combined_text += f"---\nPOST URL: {post_url}\nPOST: {caption}\n"
+                        else:
+                            combined_text += f"---\nPOST: {caption}\n"
                 post_pages.append({
                     "url": profile_url,
                     "handle": handle,
@@ -536,6 +541,22 @@ class ArtAgent:
                     node_text = (edges[0].get("node") or {}).get("text") or ""
                     if node_text:
                         return node_text.strip()
+        return ""
+
+    @staticmethod
+    def _extract_post_shortcode(post: dict) -> str:
+        """Pull the shortcode/code out of a post object for building embed URLs."""
+        for key in ("shortcode", "code", "short_code"):
+            val = post.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        # Try to extract from a permalink URL if present
+        for key in ("permalink", "url", "link"):
+            val = post.get(key)
+            if isinstance(val, str) and "/p/" in val:
+                parts = val.split("/p/")
+                if len(parts) > 1:
+                    return parts[1].strip("/").split("/")[0]
         return ""
 
     async def _run_searches_concurrent(self, queries, tracker: RunTracker) -> list[dict]:

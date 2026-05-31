@@ -44,7 +44,9 @@ Rules:
   Contemporary, Modern, Photography, Sculpture, Painting, Drawing, Mixed Media,
   Installation, Video Art, Performance, Printmaking, Ceramics, Textile, Street Art, Other.
 - description: a 1-2 sentence description from the caption. Include medium, themes, or context.
-- Populate no_tickets_source_1 with the Instagram profile URL.
+- Populate no_tickets_source_1 with the SPECIFIC POST URL if one is provided (e.g.
+  "https://www.instagram.com/p/ABC123/"). If no specific post URL is available, use
+  the Instagram profile URL instead.
 - Populate no_tickets_webpage_contents_1 with the relevant post caption text.
 - If exhibition name, gallery/venue, OR date cannot be confidently extracted, SKIP that entry.
 - DO NOT set event_entry_id or entry_batch_id — leave them as empty strings "".
