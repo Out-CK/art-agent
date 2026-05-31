@@ -159,6 +159,7 @@ class DuplicateFinder:
             "end_time": base.end_time,
             "genre": base.genre,
             "webpage_contents": base.webpage_contents,
+            "media_url": base.media_url,
             "address": base.address,
             "lat": base.lat,
             "lng": base.lng,
