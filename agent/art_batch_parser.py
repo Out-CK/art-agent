@@ -39,6 +39,10 @@ Rules:
   If no street address is visible, leave `address` empty.
 - If exhibition name, gallery/venue, OR date cannot be confidently extracted, SKIP that entry.
 - DO NOT set event_entry_id or entry_batch_id — leave them as empty strings "".
+- For the `media_url` field: look for image markdown tags in the page content (format: ![alt](url)).
+  Extract the URL of the most relevant image — prefer artwork images, exhibition photos, installation views,
+  or gallery hero images. Skip navigation icons, logos under 100px, social media share buttons,
+  tracking pixels, and ad banners. If no suitable image is found, leave media_url as null.
 - Return a JSON object with key "entries" containing an array of ArtEntry objects.
 """
 
@@ -72,6 +76,7 @@ class ArtEntry(BaseModel):
     no_tickets_source_4: Optional[str] = None
     no_tickets_webpage_contents_4: Optional[str] = None
     genre: Optional[str] = None
+    media_url: Optional[str] = None
     webpage_contents: Optional[str] = None
     address: Optional[str] = None
     lat: Optional[float] = None
@@ -106,7 +111,7 @@ class ArtBatchParser:
     def _parse_batch(self, batch: list[dict]) -> list[ArtEntry]:
         pages_text = ""
         for record in batch:
-            content_snippet = (record.get("content") or "")[:5000]
+            content_snippet = (record.get("content") or "")[:8000]
             pages_text += (
                 f"\n\n---\n"
                 f"PAGE URL: {record.get('url', '')}\n"

@@ -360,6 +360,14 @@ class ArtAgent:
         except Exception as e:
             logger.error(f"Step 7b failed: {e}")
 
+        # Step 7c — Media Enrichment
+        self._step_log("Step 7c: Media Enrichment")
+        try:
+            from agent.media_enricher import MediaEnricher
+            entry_batch = MediaEnricher().enrich(entry_batch)
+        except Exception as e:
+            logger.error(f"Step 7c failed: {e}")
+
         # Step 8 — Intra-Batch Deduplication
         self._step_log("Step 8: Intra-Batch Deduplication")
         dup_finder = DuplicateFinder(id_generator)
