@@ -14,11 +14,13 @@ from pydantic import BaseModel
 
 from agent.art_batch_parser import ArtBatchParser, ArtEntry
 from agent.art_instagram_parser import ArtInstagramParser
-from agent.art_tiktok_parser import ArtTikTokParser
 from agent.duplicate_finder import DuplicateFinder
 from agent.art_link_finder import ArtLinkFinderAgent as LinkFinderAgent
 from agent.past_event_archiver import PastEventArchiver
-from db.operations import insert_event_entries, insert_web_batch, get_existing_venue_coords
+from db.operations import (
+    insert_event_entries, insert_web_batch, get_existing_venue_coords,
+    get_recent_instagram_scrapes, upsert_instagram_scrape,
+)
 from db.supabase_client import get_supabase_client
 from tools.nimble_extract_tool import NimbleExtractTool
 from tools.nimble_instagram_tool import NimbleInstagramProfileTool
@@ -81,43 +83,35 @@ ART_INSTAGRAM_ACCOUNTS = [
 # ---------------------------------------------------------------------------
 
 ART_SEARCH_PLAN_PROMPT = """You are an expert at generating search queries to find upcoming NYC
-art gallery openings and exhibitions. Generate exactly 40 search queries.
+art gallery openings and exhibitions. Generate exactly 25 search queries.
 
 Rules:
-- Generate EXACTLY 40 queries — no more, no fewer.
+- Generate EXACTLY 25 queries — no more, no fewer.
 - Each query must have query_type "broad" or "niche".
-- Broad queries (~15): General searches covering the NYC art scene, e.g.:
+- Broad queries (~10): General searches covering the NYC art scene, e.g.:
     "NYC art gallery openings this week", "new exhibitions New York City",
     "art shows opening NYC 2026", "gallery openings Manhattan this weekend",
     "NYC museum exhibitions summer 2026", "Chelsea gallery openings",
     "Lower East Side gallery shows NYC", "Bushwick art openings",
     "upcoming art exhibitions New York", "NYC art events this month".
-- Niche queries (~25): Gallery/museum-specific or neighborhood-specific, e.g.:
-    "Gagosian Gallery New York exhibitions 2026",
-    "Pace Gallery NYC upcoming shows",
-    "David Zwirner Gallery NYC exhibitions",
-    "Hauser & Wirth New York gallery shows",
-    "MoMA upcoming exhibitions 2026",
-    "Whitney Museum exhibitions New York",
-    "New Museum Lower East Side shows",
-    "Guggenheim Museum NYC exhibitions",
-    "Metropolitan Museum of Art exhibitions 2026",
-    "Brooklyn Museum exhibitions 2026",
+- Niche queries (~15): Neighborhood-specific or aggregator-specific, e.g.:
     "Artsy NYC gallery openings",
     "Frieze New York 2026",
     "Hyperallergic NYC gallery openings",
     "Time Out New York art exhibitions",
-    "Perrotin Gallery NYC",
-    "Luhring Augustine Gallery Chelsea",
-    "Gladstone Gallery NYC exhibitions",
-    "Matthew Marks Gallery NYC",
-    "55 Walker Street gallery",
+    "NY Art Beat gallery openings",
+    "Chelsea gallery openings this week",
     "Bushwick Collective art openings",
     "Pioneer Works Brooklyn exhibitions",
-    "Printed Matter NYC art",
+    "Lower East Side gallery openings NYC",
+    "Tribeca art exhibitions 2026",
+    "SoHo gallery shows NYC",
+    "Williamsburg art openings Brooklyn",
     "Art in America NYC gallery shows",
-    "NY Art Beat gallery openings",
-    "Artforum NYC shows".
+    "Artforum NYC shows",
+    "Printed Matter NYC art".
+  Avoid queries for specific galleries whose Instagram accounts are already scraped
+  (Gagosian, Pace, Zwirner, Hauser & Wirth, Perrotin, etc.) — those are covered by Instagram.
 - Output a JSON array of objects, each with "query" (string) and "query_type" ("broad" or "niche").
 """
 
@@ -136,16 +130,16 @@ class ArtSearchPlanAgent:
         self._llm = ChatAnthropic(model=MODEL).with_structured_output(ArtSearchPlan)
 
     def generate(self) -> ArtSearchPlan:
-        logger.info("Generating 40-query Art Search Plan…")
+        logger.info("Generating 25-query Art Search Plan…")
         for attempt in range(2):
             try:
                 plan: ArtSearchPlan = self._llm.invoke(
                     [{"role": "user", "content": ART_SEARCH_PLAN_PROMPT}]
                 )
-                if len(plan.queries) != 40:
-                    logger.warning(f"Art search plan returned {len(plan.queries)} queries (expected 40). Attempt {attempt + 1}/2.")
+                if len(plan.queries) != 25:
+                    logger.warning(f"Art search plan returned {len(plan.queries)} queries (expected 25). Attempt {attempt + 1}/2.")
                     if attempt == 1:
-                        raise ValueError(f"LLM produced {len(plan.queries)} queries after 2 attempts; expected 40.")
+                        raise ValueError(f"LLM produced {len(plan.queries)} queries after 2 attempts; expected 25.")
                     continue
                 logger.info(f"Art Search Plan generated with {len(plan.queries)} queries")
                 return plan
@@ -178,8 +172,6 @@ class ArtAgent:
         stats = {
             "instagram_profiles_scraped": 0,
             "instagram_entries_parsed": 0,
-            "tiktok_videos_collected": 0,
-            "tiktok_entries_parsed": 0,
             "queries_executed": 0,
             "pages_round1": 0,
             "pages_round2": 0,
@@ -195,8 +187,14 @@ class ArtAgent:
         social_entries: list[ArtEntry] = []
         id_generator = IDGenerator(self._supabase)
         try:
+            recently_scraped = get_recent_instagram_scrapes(days=5)
+            accounts_to_scrape = [h for h in ART_INSTAGRAM_ACCOUNTS if h not in recently_scraped]
+            logger.info(
+                f"Instagram: {len(accounts_to_scrape)} accounts to scrape "
+                f"({len(recently_scraped)} skipped — scraped within 5 days)"
+            )
             raw_profiles = asyncio.run(
-                self._scrape_instagram_profiles_concurrent(ART_INSTAGRAM_ACCOUNTS)
+                self._scrape_instagram_profiles_concurrent(accounts_to_scrape)
             )
             post_pages: list[dict] = []
             for handle, profile_data in raw_profiles:
@@ -211,6 +209,7 @@ class ArtAgent:
                 if not posts:
                     continue
                 stats["instagram_profiles_scraped"] += 1
+                upsert_instagram_scrape(handle)
                 combined_text = f"BIOGRAPHY: {bio}\n\n"
                 for post in posts:
                     caption = self._extract_post_caption(post)
@@ -223,7 +222,7 @@ class ArtAgent:
                 })
             logger.info(
                 f"Instagram: scraped {stats['instagram_profiles_scraped']} profiles "
-                f"from {len(ART_INSTAGRAM_ACCOUNTS)} accounts"
+                f"from {len(accounts_to_scrape)} accounts"
             )
             if post_pages:
                 ig_entries = ArtInstagramParser().parse(post_pages)
@@ -235,27 +234,6 @@ class ArtAgent:
                 logger.info(f"Instagram: parsed {len(ig_entries)} art entries")
         except Exception as e:
             logger.error(f"Step 0a failed: {e}")
-
-        # Step 0b — TikTok: Scrape gallery/museum accounts and art hashtags
-        self._step_log("Step 0b: TikTok Gallery & Museum Scraping")
-        try:
-            tiktok_parser = ArtTikTokParser()
-            raw_videos = tiktok_parser.scrape()
-            filtered_videos = tiktok_parser.filter_art_videos(raw_videos)
-            stats["tiktok_videos_collected"] = len(filtered_videos)
-            logger.info(
-                f"TikTok: {len(raw_videos)} raw videos → {len(filtered_videos)} after keyword filter"
-            )
-            if filtered_videos:
-                tk_entries = tiktok_parser.parse(filtered_videos)
-                stats["tiktok_entries_parsed"] = len(tk_entries)
-                for entry in tk_entries:
-                    entry.entry_batch_id = entry_batch_id
-                    entry.event_entry_id = id_generator.next()
-                social_entries.extend(tk_entries)
-                logger.info(f"TikTok: parsed {len(tk_entries)} art entries")
-        except Exception as e:
-            logger.error(f"Step 0b failed: {e}")
 
         # Step 1 — Generate Search Plan
         self._step_log("Step 1: Generate Art Search Plan")
@@ -410,8 +388,6 @@ class ArtAgent:
             f"=== Art Run COMPLETE | entry_batch_id={entry_batch_id} | duration={duration:.1f}s ===\n"
             f"  Instagram profiles scraped:  {stats['instagram_profiles_scraped']}\n"
             f"  Instagram entries parsed:    {stats['instagram_entries_parsed']}\n"
-            f"  TikTok videos collected:     {stats['tiktok_videos_collected']}\n"
-            f"  TikTok entries parsed:       {stats['tiktok_entries_parsed']}\n"
             f"  Web queries executed:        {stats['queries_executed']}\n"
             f"  Pages fetched (Round 1):     {stats['pages_round1']}\n"
             f"  Pages fetched (Round 2):     {stats['pages_round2']}\n"

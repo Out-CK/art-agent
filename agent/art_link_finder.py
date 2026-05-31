@@ -53,7 +53,10 @@ class ArtLinkFinderAgent:
                 logger.error(f"ArtLinkFinder batch {batch_start}–{batch_start + BATCH_SIZE} failed: {e}")
 
         new_urls = [u for u in found_urls if u not in existing_urls]
-        logger.info(f"ArtLinkFinder found {len(new_urls)} new gallery/exhibition URLs")
+        if len(new_urls) > 30:
+            logger.info(f"ArtLinkFinder found {len(new_urls)} URLs, capping at 30")
+            new_urls = new_urls[:30]
+        logger.info(f"ArtLinkFinder returning {len(new_urls)} new gallery/exhibition URLs")
         return new_urls
 
     def _process_batch(self, batch: list[dict], already_fetched: set[str]) -> list[str]:

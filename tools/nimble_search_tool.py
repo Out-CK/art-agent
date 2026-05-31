@@ -42,7 +42,7 @@ class NimbleSearchTool(BaseTool):
         api_key = os.environ["NIMBLE_API_KEY"]
         nimble = Nimble(api_key=api_key)
 
-        max_results = 10 if query_type == "broad" else 5
+        max_results = 5
         logger.info(f"Nimble search | query_type={query_type} max_results={max_results} | query: {query!r}")
 
         result = nimble.search(

@@ -167,6 +167,41 @@ def update_venue_coords(venue: str, lat: float, lng: float, address: str) -> Non
         raise
 
 
+# ---------------------------------------------------------------------------
+# Instagram Scrape Cache
+# ---------------------------------------------------------------------------
+
+def get_recent_instagram_scrapes(days: int = 5) -> set[str]:
+    """Return Instagram handles that were successfully scraped within the last N days."""
+    client = get_supabase_client()
+    try:
+        from datetime import datetime, timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        result = (
+            client.table("instagram_scrape_cache")
+            .select("handle")
+            .gte("scraped_at", cutoff)
+            .execute()
+        )
+        return {r["handle"] for r in (result.data or [])}
+    except Exception as e:
+        logger.warning(f"Could not fetch instagram scrape cache (table may not exist): {e}")
+        return set()
+
+
+def upsert_instagram_scrape(handle: str) -> None:
+    """Record that an Instagram handle was scraped now."""
+    client = get_supabase_client()
+    try:
+        from datetime import datetime
+        client.table("instagram_scrape_cache").upsert(
+            {"handle": handle, "scraped_at": datetime.utcnow().isoformat()},
+            on_conflict="handle",
+        ).execute()
+    except Exception as e:
+        logger.warning(f"Could not upsert instagram scrape cache for @{handle}: {e}")
+
+
 def insert_past_event_entry(entry: dict[str, Any]) -> None:
     """Insert a single entry into past_event_entry_database."""
     client = get_supabase_client()

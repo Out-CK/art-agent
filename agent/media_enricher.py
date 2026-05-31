@@ -19,7 +19,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 MODEL = "claude-sonnet-4-6"
-MAX_LOOKUPS = 15
+MAX_LOOKUPS = 5
 
 SYSTEM_PROMPT = """You are an image URL extractor. You will receive search result snippets about an event or artist.
 Your job is to find the single best image URL from the content.
