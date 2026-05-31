@@ -28,6 +28,7 @@ from tools.nimble_search_tool import NimbleSearchTool
 from utils.geocoder import enrich_entries_with_coords
 from utils.id_generator import IDGenerator
 from utils.logger import get_logger
+from utils.run_tracker import RunTracker
 
 logger = get_logger(__name__)
 
@@ -164,9 +165,11 @@ class ArtAgent:
         self._supabase = get_supabase_client()
 
     def run(self) -> None:
+        tracker = RunTracker(agent_name="art", run_type="web_search").start()
         run_start = time.time()
         entry_batch_id = datetime.now().strftime("%m%d%Y_%H%M%S")
         web_batch_id = datetime.now().strftime("%m%d%Y")
+        tracker.entry_batch_id = entry_batch_id
         logger.info(f"=== Art Run START | entry_batch_id={entry_batch_id} ===")
 
         stats = {
@@ -182,6 +185,9 @@ class ArtAgent:
             "entries_archived": 0,
         }
 
+        run_status = "success"
+        error_msg = None
+
         # Step 0a — Instagram: Scrape gallery/museum profiles
         self._step_log("Step 0a: Instagram Gallery & Museum Scraping")
         social_entries: list[ArtEntry] = []
@@ -194,7 +200,7 @@ class ArtAgent:
                 f"({len(recently_scraped)} skipped — scraped within 5 days)"
             )
             raw_profiles = asyncio.run(
-                self._scrape_instagram_profiles_concurrent(accounts_to_scrape)
+                self._scrape_instagram_profiles_concurrent(accounts_to_scrape, tracker)
             )
             post_pages: list[dict] = []
             for handle, profile_data in raw_profiles:
@@ -220,6 +226,7 @@ class ArtAgent:
                     "handle": handle,
                     "content": combined_text[:30000],
                 })
+            tracker.set("instagram_profiles_scraped", stats["instagram_profiles_scraped"])
             logger.info(
                 f"Instagram: scraped {stats['instagram_profiles_scraped']} profiles "
                 f"from {len(accounts_to_scrape)} accounts"
@@ -227,6 +234,7 @@ class ArtAgent:
             if post_pages:
                 ig_entries = ArtInstagramParser().parse(post_pages)
                 stats["instagram_entries_parsed"] = len(ig_entries)
+                tracker.set("instagram_entries_parsed", len(ig_entries))
                 for entry in ig_entries:
                     entry.entry_batch_id = entry_batch_id
                     entry.event_entry_id = id_generator.next()
@@ -241,13 +249,17 @@ class ArtAgent:
             search_plan = ArtSearchPlanAgent().generate()
         except Exception as e:
             logger.error(f"Step 1 failed: {e}")
+            tracker.finish(status="failed", error_message=str(e))
             return
 
         # Step 2 — Web Search Round 1
         self._step_log("Step 2: Web Search Round 1")
         try:
-            round1_results = asyncio.run(self._run_searches_concurrent(search_plan.queries))
+            round1_results = asyncio.run(
+                self._run_searches_concurrent(search_plan.queries, tracker)
+            )
             stats["queries_executed"] = len(search_plan.queries)
+            tracker.set("queries_executed", len(search_plan.queries))
             seen_urls: set[str] = set()
             web_batch: list[dict] = []
             for result in round1_results:
@@ -255,10 +267,13 @@ class ArtAgent:
                     seen_urls.add(result["url"])
                     web_batch.append(result)
             stats["pages_round1"] = len(web_batch)
+            tracker.set("pages_fetched_round1", len(web_batch))
             logger.info(f"Round 1: {len(web_batch)} unique pages collected")
         except Exception as e:
             logger.error(f"Step 2 failed: {e}")
             web_batch = []
+            run_status = "partial"
+            error_msg = f"Step 2: {e}"
 
         # Step 3 — Store Round 1 Web Batch
         self._step_log("Step 3: Store Round 1 Web Batch")
@@ -286,9 +301,12 @@ class ArtAgent:
         round2_batch: list[dict] = []
         try:
             if additional_urls:
-                round2_results = asyncio.run(self._run_extracts_concurrent(additional_urls))
+                round2_results = asyncio.run(
+                    self._run_extracts_concurrent(additional_urls, tracker)
+                )
                 round2_batch = [r for r in round2_results if r.get("content")]
                 stats["pages_round2"] = len(round2_batch)
+                tracker.set("pages_fetched_round2", len(round2_batch))
                 logger.info(f"Round 2: {len(round2_batch)} pages extracted")
         except Exception as e:
             logger.error(f"Step 5 failed: {e}")
@@ -312,6 +330,7 @@ class ArtAgent:
         try:
             raw_entries = ArtBatchParser().parse(full_batch)
             stats["entries_parsed"] = len(raw_entries)
+            tracker.set("raw_entries_parsed", len(raw_entries))
             for entry in raw_entries:
                 entry.entry_batch_id = entry_batch_id
                 entry.event_entry_id = id_generator.next()
@@ -330,7 +349,11 @@ class ArtAgent:
         try:
             known_coords = get_existing_venue_coords()
             entry_dicts = [e.model_dump() for e in entry_batch]
+            cached_before = sum(1 for d in entry_dicts if d.get("lat"))
             entry_dicts = enrich_entries_with_coords(entry_dicts, known_coords)
+            cached_after = sum(1 for d in entry_dicts if d.get("lat"))
+            tracker.set("venues_geocoded", cached_after - cached_before)
+            tracker.set("venues_from_cache", cached_before)
             for entry, d in zip(entry_batch, entry_dicts):
                 entry.address = d.get("address")
                 entry.lat = d.get("lat")
@@ -342,7 +365,12 @@ class ArtAgent:
         self._step_log("Step 7c: Media Enrichment")
         try:
             from agent.media_enricher import MediaEnricher
-            entry_batch = MediaEnricher().enrich(entry_batch)
+            enricher = MediaEnricher()
+            pre_media = sum(1 for e in entry_batch if getattr(e, "media_url", None))
+            entry_batch = enricher.enrich(entry_batch)
+            post_media = sum(1 for e in entry_batch if getattr(e, "media_url", None))
+            tracker.set("media_enricher_lookups", len([e for e in entry_batch if not getattr(e, "media_url", None)]) + (post_media - pre_media))
+            tracker.set("media_enricher_found", post_media - pre_media)
         except Exception as e:
             logger.error(f"Step 7c failed: {e}")
 
@@ -353,6 +381,7 @@ class ArtAgent:
             pre_count = len(entry_batch)
             entry_batch = dup_finder.deduplicate_batch(entry_batch)
             stats["dupes_intrabatch"] = pre_count - len(entry_batch)
+            tracker.set("intra_batch_dupes_removed", pre_count - len(entry_batch))
         except Exception as e:
             logger.error(f"Step 8 failed: {e}")
 
@@ -362,8 +391,12 @@ class ArtAgent:
             pre_count = len(entry_batch)
             entry_batch = dup_finder.cross_reference_db(entry_batch)
             stats["dupes_crossdb"] = pre_count - len(entry_batch)
+            tracker.set("cross_db_dupes_removed", pre_count - len(entry_batch))
         except Exception as e:
             logger.error(f"Step 9 failed: {e}")
+
+        # Count missing fields before insert
+        tracker.count_missing_fields(entry_batch)
 
         # Step 10 — Insert
         self._step_log("Step 10: Insert Art Entries")
@@ -373,13 +406,17 @@ class ArtAgent:
                 entry.event_entry_id = fresh_id_gen.next()
             rows = [e.model_dump() for e in entry_batch]
             stats["entries_inserted"] = insert_event_entries(rows)
+            tracker.set("entries_inserted", stats["entries_inserted"])
         except Exception as e:
             logger.error(f"Step 10 failed: {e}")
+            run_status = "failed"
+            error_msg = f"Step 10: {e}"
 
         # Step 11 — Archive Past Events
         self._step_log("Step 11: Archive Past Events")
         try:
             stats["entries_archived"] = PastEventArchiver().run()
+            tracker.set("entries_archived", stats["entries_archived"])
         except Exception as e:
             logger.error(f"Step 11 failed: {e}")
 
@@ -398,21 +435,26 @@ class ArtAgent:
             f"  Entries archived:            {stats['entries_archived']}"
         )
 
+        tracker.finish(status=run_status, error_message=error_msg)
+
     async def _scrape_instagram_profiles_concurrent(
-        self, handles: list[str]
+        self, handles: list[str], tracker: RunTracker
     ) -> list[tuple[str, dict]]:
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
         async def scrape_one(handle: str) -> tuple[str, dict]:
             async with semaphore:
                 loop = asyncio.get_event_loop()
+                tracker.inc("nimble_instagram_calls")
                 try:
                     data = await loop.run_in_executor(
                         None, lambda: self._instagram_profile_tool._run(handle)
                     )
+                    tracker.inc("nimble_instagram_successes")
                     return (handle, data)
                 except Exception as e:
                     logger.error(f"Instagram profile failed for @{handle}: {e}")
+                    tracker.inc("nimble_instagram_failures")
                     return (handle, {})
 
         return list(await asyncio.gather(*[scrape_one(h) for h in handles]))
@@ -432,34 +474,46 @@ class ArtAgent:
                         return node_text.strip()
         return ""
 
-    async def _run_searches_concurrent(self, queries) -> list[dict]:
+    async def _run_searches_concurrent(self, queries, tracker: RunTracker) -> list[dict]:
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
         async def search_one(sq):
             async with semaphore:
                 loop = asyncio.get_event_loop()
+                tracker.inc("nimble_search_calls")
                 try:
                     results = await loop.run_in_executor(
                         None, lambda: self._search_tool._run(sq.query, sq.query_type)
                     )
+                    tracker.inc("nimble_search_successes")
                     return [{**r, "query_used": sq.query} for r in results]
                 except Exception as e:
                     logger.error(f"Search failed for '{sq.query}': {e}")
+                    tracker.inc("nimble_search_failures")
                     return []
 
         results_nested = await asyncio.gather(*[search_one(sq) for sq in queries])
         return [item for sublist in results_nested for item in sublist]
 
-    async def _run_extracts_concurrent(self, urls: list[str]) -> list[dict]:
+    async def _run_extracts_concurrent(self, urls: list[str], tracker: RunTracker) -> list[dict]:
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
         async def extract_one(url: str):
             async with semaphore:
                 loop = asyncio.get_event_loop()
+                tracker.inc("nimble_extract_calls")
                 try:
-                    return await loop.run_in_executor(None, lambda: self._extract_tool._run(url))
+                    result = await loop.run_in_executor(
+                        None, lambda: self._extract_tool._run(url)
+                    )
+                    if result.get("content"):
+                        tracker.inc("nimble_extract_successes")
+                    else:
+                        tracker.inc("nimble_extract_failures")
+                    return result
                 except Exception as e:
                     logger.error(f"Extract failed for '{url}': {e}")
+                    tracker.inc("nimble_extract_failures")
                     return {"url": url, "content": None}
 
         return list(await asyncio.gather(*[extract_one(u) for u in urls]))
