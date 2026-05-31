@@ -72,6 +72,10 @@ class MediaEnricher:
             return None
 
         # First try: extract image URLs directly from search snippets using regex
+        skip_pattern = re.compile(
+            r"icon|logo|favicon|pixel|1x1|badge|button|banner|tracking|spacer|sprite",
+            re.IGNORECASE,
+        )
         for r in results[:3]:
             content = r.get("content", "")
             img_urls = re.findall(
@@ -79,8 +83,9 @@ class MediaEnricher:
                 content,
                 re.IGNORECASE,
             )
-            if img_urls:
-                return img_urls[0]
+            for url in img_urls:
+                if not skip_pattern.search(url):
+                    return url
 
         # Fallback: ask Claude to extract from combined snippets
         snippets = "\n---\n".join(
